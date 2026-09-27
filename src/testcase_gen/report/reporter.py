@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional
+from typing import Iterable, Optional
 
 from testcase_gen.executor import ExecutionResult
 from testcase_gen.models import CaseSpec, CaseType, RuleSpec
@@ -7,6 +7,7 @@ from testcase_gen.validator import GoldValidationResult
 from .models import (
     CaseResult,
     CaseResultStatus,
+    LLMGenerationStats,
     OverallStatus,
     PhaseStatus,
     ReportIssue,
@@ -24,6 +25,10 @@ def build_report(
     generation_errors: Optional[Iterable[str]] = None,
     duration: float = 0.0,
     expected_rule_count: Optional[int] = None,
+    generation_mode: str = "baseline",
+    baseline_cases: Optional[Iterable[CaseSpec]] = None,
+    llm_stats: Optional[LLMGenerationStats] = None,
+    expected_execution_count: Optional[int] = None,
 ) -> TestReport:
     if duration < 0:
         raise ValueError("duration must not be negative")
@@ -74,7 +79,12 @@ def build_report(
     elif (
         execution_failed
         or execution_errors
-        or len(execution_list) != len(case_list)
+        or len(execution_list)
+        != (
+            len(case_list)
+            if expected_execution_count is None
+            else expected_execution_count
+        )
     ):
         runtime_status = PhaseStatus.FAIL
     else:
@@ -121,6 +131,13 @@ def build_report(
         gold_status=gold_status,
         runtime_status=runtime_status,
         overall_status=overall_status,
+        generation_mode=str(generation_mode),
+        baseline_case_count=(
+            len(case_list)
+            if baseline_cases is None
+            else len(list(baseline_cases))
+        ),
+        llm=llm_stats,
     )
 
 

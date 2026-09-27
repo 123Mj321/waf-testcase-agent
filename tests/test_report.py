@@ -6,7 +6,6 @@ import pytest
 
 from testcase_gen.executor import ExecutionResult
 from testcase_gen.generator import generate_cases
-from testcase_gen.models import CaseType
 from testcase_gen.parser import parse_rules_file
 from testcase_gen.report import (
     CaseResultStatus,

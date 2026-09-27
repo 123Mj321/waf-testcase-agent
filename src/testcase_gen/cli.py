@@ -6,7 +6,18 @@ from time import perf_counter
 from typing import Callable, List, Optional, Sequence, TextIO
 
 from testcase_gen.executor import ExecutionResult, HttpExecutor
-from testcase_gen.generator import UnsupportedRuleError, generate_cases
+from testcase_gen.generator import (
+    AIUsageLog,
+    DEFAULT_LLM_TIMEOUT,
+    LLMConfig,
+    LLMError,
+    LLMExpansionResult,
+    UnsupportedRuleError,
+    assemble_cases,
+    expand_with_llm,
+    generate_cases,
+    provider_choices,
+)
 from testcase_gen.models import CaseSpec
 from testcase_gen.parser import SecRuleParseError, parse_rules_file
 from testcase_gen.report import (
@@ -23,6 +34,7 @@ from testcase_gen.validator import GoldFormatError, validate_gold_file
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_GOLD_PATH = Path("gold.json")
 DEFAULT_OUTPUT_DIR = Path("artifacts")
+AI_USAGE_LOG_NAME = "ai_usage_log.jsonl"
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -67,12 +79,88 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show traceback for unexpected internal errors",
     )
+    parser.add_argument(
+        "--generation-mode",
+        choices=["baseline", "llm", "hybrid"],
+        default="hybrid",
+        help=(
+            "baseline: deterministic only (offline); llm: LLM candidates "
+            "replace the baseline per rule; hybrid: baseline + LLM expansion "
+            "(default: hybrid)"
+        ),
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=list(provider_choices()),
+        default="auto",
+        help="LLM provider (default: auto, uses the API key env var if set)",
+    )
+    parser.add_argument(
+        "--llm-model",
+        help="LLM model name (default: provider specific)",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        help="OpenAI compatible base URL (default: provider specific)",
+    )
+    parser.add_argument(
+        "--llm-api-key-env",
+        default="OPENAI_API_KEY",
+        help="environment variable holding the API key (default: OPENAI_API_KEY)",
+    )
+    parser.add_argument(
+        "--llm-max-candidates",
+        type=_positive_int,
+        default=8,
+        metavar="N",
+        help="maximum candidates requested per rule (default: 8)",
+    )
+    parser.add_argument(
+        "--llm-timeout",
+        type=_positive_timeout,
+        default=DEFAULT_LLM_TIMEOUT,
+        metavar="SECONDS",
+        help="LLM HTTP timeout in seconds (default: 120)",
+    )
+    parser.add_argument(
+        "--llm-max-tokens",
+        type=_positive_int,
+        metavar="N",
+        help=(
+            "hard cap on generated tokens; omit it for reasoning models, "
+            "otherwise the whole budget may be spent on reasoning"
+        ),
+    )
+    parser.add_argument(
+        "--llm-temperature",
+        type=float,
+        default=0.2,
+        metavar="T",
+        help="LLM sampling temperature (default: 0.2)",
+    )
+    parser.add_argument(
+        "--llm-no-execute",
+        action="store_true",
+        help=(
+            "execute only the deterministic baseline cases; LLM expanded cases "
+            "are still generated and reported but not sent to the WAF"
+        ),
+    )
+    parser.add_argument(
+        "--llm-save-raw",
+        action="store_true",
+        help=(
+            "also store the raw prompt/response in artifacts/llm_raw "
+            "(secrets are redacted; default: off)"
+        ),
+    )
     return parser
 
 
 def main(
     argv: Optional[Sequence[str]] = None,
     executor_factory: Optional[Callable[..., object]] = None,
+    llm_provider_factory: Optional[Callable[..., object]] = None,
     stdout: Optional[TextIO] = None,
     stderr: Optional[TextIO] = None,
 ) -> int:
@@ -85,6 +173,7 @@ def main(
         return run_pipeline(
             args,
             executor_factory=executor_factory,
+            llm_provider_factory=llm_provider_factory,
             stdout=output,
             stderr=error_output,
         )
@@ -98,6 +187,7 @@ def main(
 def run_pipeline(
     args: argparse.Namespace,
     executor_factory: Optional[Callable[..., object]] = None,
+    llm_provider_factory: Optional[Callable[..., object]] = None,
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
 ) -> int:
@@ -107,6 +197,7 @@ def run_pipeline(
     output_dir = Path(args.output_dir)
     generated_path = output_dir / "generated_cases.json"
     report_path = output_dir / "report.json"
+    usage_log_path = output_dir / AI_USAGE_LOG_NAME
     base_url = resolve_base_url(args.base_url)
 
     if not rules_path.is_file():
@@ -138,11 +229,26 @@ def run_pipeline(
         )
         return 2
 
-    cases: List[CaseSpec] = []
+    llm_config = LLMConfig.from_args(args)
+    try:
+        resolved_llm = llm_config.resolve()
+    except LLMError:
+        resolved_llm = None
+    secrets = []
+    if resolved_llm is not None and resolved_llm.api_key:
+        secrets.append(resolved_llm.api_key)
+    audit_log = AIUsageLog(
+        path=usage_log_path,
+        raw_dir=output_dir / "llm_raw",
+        save_raw=llm_config.save_raw,
+        redact=secrets,
+    )
+
+    baseline_cases: List[CaseSpec] = []
     unsupported_rules: List[ReportIssue] = []
     generation_errors: List[str] = []
     try:
-        cases = generate_cases(rules)
+        baseline_cases = generate_cases(rules)
     except UnsupportedRuleError as exc:
         unsupported_rules.append(
             ReportIssue(
@@ -154,6 +260,36 @@ def run_pipeline(
     except ValueError as exc:
         generation_errors.append(str(exc))
 
+    if baseline_cases:
+        try:
+            expansion = expand_with_llm(
+                rules,
+                baseline_cases,
+                config=llm_config,
+                audit_log=audit_log,
+                provider_factory=llm_provider_factory,
+            )
+        except Exception as exc:  # the LLM layer must never break the pipeline
+            expansion = LLMExpansionResult(
+                status="error",
+                degraded=True,
+                degrade_reason="llm expansion failed: {}: {}".format(
+                    type(exc).__name__, exc
+                ),
+            )
+    else:
+        expansion = LLMExpansionResult(
+            status="disabled",
+            degraded=True,
+            degrade_reason="baseline generation produced no cases",
+        )
+
+    try:
+        cases = assemble_cases(args.generation_mode, baseline_cases, expansion.cases)
+    except ValueError as exc:
+        _print_error("invalid generation mode: {}".format(exc), stderr)
+        return 2
+
     try:
         _write_generated_cases(cases, generated_path)
     except OSError as exc:
@@ -164,13 +300,24 @@ def run_pipeline(
         return 2
 
     try:
-        gold_validation = validate_gold_file(cases, gold_path)
+        gold_validation = validate_gold_file(baseline_cases, gold_path)
     except (GoldFormatError, json.JSONDecodeError, OSError, UnicodeError) as exc:
         _print_error("gold file could not be loaded: {}".format(exc), stderr)
         return 2
 
+    executable_cases = cases
+    expected_execution_count = None
+    if getattr(args, "llm_no_execute", False):
+        executable_cases = [
+            case for case in cases if case.metadata.get("source") != "llm"
+        ]
+        if len(executable_cases) != len(cases):
+            expected_execution_count = len(executable_cases)
+
     execution_results = None
-    can_execute = not unsupported_rules and not generation_errors and bool(cases)
+    can_execute = (
+        not unsupported_rules and not generation_errors and bool(executable_cases)
+    )
     if not args.no_execute and can_execute:
         factory = HttpExecutor if executor_factory is None else executor_factory
         try:
@@ -181,7 +328,7 @@ def run_pipeline(
 
         execution_results = []
         try:
-            for case in cases:
+            for case in executable_cases:
                 execution_results.append(_execute_case(executor, case))
         finally:
             executor.close()
@@ -197,6 +344,10 @@ def run_pipeline(
         generation_errors=generation_errors,
         duration=(perf_counter() - started_at) * 1000,
         expected_rule_count=len(rules),
+        generation_mode=args.generation_mode,
+        baseline_cases=baseline_cases,
+        llm_stats=expansion.to_stats(),
+        expected_execution_count=expected_execution_count,
     )
 
     try:
@@ -208,9 +359,17 @@ def run_pipeline(
         )
         return 2
 
-    _print_context(rules_path, gold_path, base_url, args.no_execute, stdout)
+    _print_context(
+        rules_path,
+        gold_path,
+        base_url,
+        args.no_execute,
+        stdout,
+        generation_mode=args.generation_mode,
+        llm_summary=_llm_summary(expansion),
+    )
     print_terminal_report(report, stream=stdout)
-    _print_artifacts(generated_path, report_path, stdout)
+    _print_artifacts(generated_path, report_path, usage_log_path, stdout)
 
     exit_code = 0 if report.overall_status == OverallStatus.SUCCESS else 1
     print("Exit code: {}".format(exit_code), file=stdout)
@@ -275,26 +434,53 @@ def _print_context(
     base_url: str,
     no_execute: bool,
     stream: TextIO,
+    generation_mode: str = "baseline",
+    llm_summary: str = "not configured",
 ) -> None:
     print("Input", file=stream)
     print("Rules: {}".format(rules_path), file=stream)
     print("Gold:  {}".format(gold_path), file=stream)
+    print("Mode:  {}".format(generation_mode), file=stream)
+    print("LLM:   {}".format(llm_summary), file=stream)
     print("WAF:   {}".format("NOT RUN" if no_execute else base_url), file=stream)
     print(file=stream)
 
 
 def _print_artifacts(
-    generated_path: Path, report_path: Path, stream: TextIO
+    generated_path: Path,
+    report_path: Path,
+    usage_log_path: Path,
+    stream: TextIO,
 ) -> None:
     print(file=stream)
     print("Artifacts", file=stream)
     print("Generated cases: {}".format(generated_path), file=stream)
     print("Report:           {}".format(report_path), file=stream)
+    print("AI usage log:     {}".format(usage_log_path), file=stream)
     print(file=stream)
+
+
+def _llm_summary(expansion: LLMExpansionResult) -> str:
+    if expansion.provider is None:
+        return "not configured -> deterministic baseline"
+    provider = expansion.provider
+    if expansion.simulated:
+        provider = "{} (simulated)".format(provider)
+    return "{}/{}".format(provider, expansion.model or "unknown")
 
 
 def _print_error(message: str, stream: TextIO) -> None:
     print("ERROR: {}".format(message), file=stream)
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return number
 
 
 def _positive_timeout(value: str) -> float:

@@ -2,6 +2,7 @@ from .json_report import render_json_report, write_json_report
 from .models import (
     CaseResult,
     CaseResultStatus,
+    LLMGenerationStats,
     OverallStatus,
     PhaseStatus,
     ReportIssue,
@@ -13,6 +14,7 @@ from .terminal import print_terminal_report, render_terminal_report
 __all__ = [
     "CaseResult",
     "CaseResultStatus",
+    "LLMGenerationStats",
     "OverallStatus",
     "PhaseStatus",
     "ReportIssue",

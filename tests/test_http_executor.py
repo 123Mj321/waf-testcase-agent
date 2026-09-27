@@ -1,7 +1,6 @@
 import time
 
 import httpx
-import pytest
 
 from testcase_gen.executor import HttpExecutor
 from testcase_gen.models import CaseSpec, CaseType

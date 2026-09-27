@@ -309,6 +309,7 @@ def test_report_json_contains_stable_top_level_sections(tmp_path):
     assert set(report) == {
         "summary",
         "generation",
+        "llm",
         "gold_validation",
         "execution",
         "cases",
@@ -363,7 +364,7 @@ def test_root_wrapper_and_console_script_configuration_exist():
     assert 'testcase-gen = "testcase_gen.cli:main"' in pyproject
 
 
-def test_gitignore_ignores_runtime_artifacts_and_caches():
+def test_gitignore_ignores_runtime_artifacts_and_caches(tmp_path):
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     patterns = [
         line.strip()
@@ -386,6 +387,13 @@ def test_gitignore_ignores_runtime_artifacts_and_caches():
         "Thumbs.db",
     ):
         assert expected in patterns
+
+    invoke_cli(
+        tmp_path,
+        FakeExecutorFactory(fail_on_create=True),
+        extra_args=["--no-execute"],
+        output_dir=ROOT / "artifacts",
+    )
 
     assert (ROOT / "artifacts" / "report.json").exists()
     assert "artifacts/" in patterns
