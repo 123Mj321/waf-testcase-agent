@@ -1,0 +1,18 @@
+[
+  {"rule_id":1001,"type":"positive","method":"GET","path":"/?id=1 OR 1=1","headers":{},"body":null,"expected_code":403},
+  {"rule_id":1001,"type":"negative","method":"GET","path":"/?id=normal_value","headers":{},"body":null,"expected_code":200},
+  {"rule_id":1002,"type":"positive","method":"GET","path":"/?q=<ScRiPt>alert(1)</ScRiPt>","headers":{},"body":null,"expected_code":403},
+  {"rule_id":1002,"type":"negative","method":"GET","path":"/?q=hello+world","headers":{},"body":null,"expected_code":200},
+  {"rule_id":1003,"type":"positive","method":"GET","path":"/?file=%2e%2e%2f%2e%2e%2fetc/passwd","headers":{},"body":null,"expected_code":403},
+  {"rule_id":1003,"type":"negative","method":"GET","path":"/?file=docs/readme.txt","headers":{},"body":null,"expected_code":200},
+  {"rule_id":1004,"type":"positive","method":"GET","path":"/","headers":{"User-Agent":"sqlmap/1.7"},"body":null,"expected_code":403},
+  {"rule_id":1004,"type":"negative","method":"GET","path":"/","headers":{"User-Agent":"Mozilla/5.0"},"body":null,"expected_code":200},
+  {"rule_id":1005,"type":"positive","method":"DELETE","path":"/resource","headers":{},"body":null,"expected_code":405},
+  {"rule_id":1005,"type":"negative","method":"POST","path":"/resource","headers":{},"body":null,"expected_code":200},
+  {"rule_id":1006,"type":"positive","method":"GET","path":"/api/health?id=1 OR 1=1","headers":{},"body":null,"expected_code":200},
+  {"rule_id":1006,"type":"negative","method":"GET","path":"/other?id=1 OR 1=1","headers":{},"body":null,"expected_code":403},
+  {"rule_id":1007,"type":"positive","method":"GET","path":"/","headers":{"Referer":"https://evil.com/page"},"body":null,"expected_code":403},
+  {"rule_id":1007,"type":"negative","method":"GET","path":"/","headers":{"Referer":"https://google.com"},"body":null,"expected_code":200},
+  {"rule_id":1008,"type":"positive","method":"POST","path":"/search","headers":{"Content-Type":"application/x-www-form-urlencoded"},"body":"query=SELECT name FROM users","expected_code":403},
+  {"rule_id":1008,"type":"negative","method":"POST","path":"/search","headers":{"Content-Type":"application/x-www-form-urlencoded"},"body":"query=hello","expected_code":200}
+]

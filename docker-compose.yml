@@ -1,0 +1,15 @@
+services:
+  backend:
+    image: nginxdemos/hello:0.4-plain-text
+  waf:
+    image: owasp/modsecurity-crs:4.8.0-nginx-202411071011
+    ports: ["8080:8080"]
+    environment:
+      BACKEND: http://backend
+      MODSEC_RULE_ENGINE: "On"
+      MODSEC_AUDIT_LOG_FORMAT: JSON
+      MODSEC_AUDIT_LOG: /dev/stderr
+      PARANOIA: "1"
+    volumes:
+      - ./rules.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+    depends_on: [backend]

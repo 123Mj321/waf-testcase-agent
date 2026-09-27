@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -d "$SCRIPT_DIR/src" ]; then
+    PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH
+fi
+
+if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN=python
+else
+    PYTHON_BIN=python3
+fi
+
+exec "$PYTHON_BIN" -m testcase_gen.cli "$@"
